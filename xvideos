@@ -1,0 +1,104 @@
+#!/bin/bash
+
+declare -r threads='16'
+
+ucurl() {
+    curl -L -g -s --user-agent 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) QtWebEngine/5.15.2 Chrome/87.0.4280.144 Safari/537.36' -H 'Accept-Encoding: gzip, deflate' --compressed "$@"
+}
+
+declare -r arg0="$(basename "$0")"
+
+usage() {
+    printf '%s [dir] [URL]...\nArchive xvideos videos metadata in json to DIR\nUrls are taken from recursive spider starting from URL.\n' "$arg0"
+}
+
+get_page() {
+    local -r rh="$(sha256sum <<< "$1")"
+    local -r name="${rh%  *}"
+    #local -r name3="${name:0:3}"
+    [ -e "$name" ] && return #$name3/$name
+    local -r t="$(ucurl "$1")"
+    local jn="$(sed -n '/^<script>if(!window\.xv){window\.xv={};}window\.xv\.conf=/{s/^<script>if(!window\.xv){window\.xv={};}window.xv\.conf=//; s/;<\/script>$//; p;q}' <<< "$t")"
+    local _tmp1
+    {
+    echo "$1" #link
+    echo "$(jq -r '.dyn | "\(.id)\n\(.pagefilter)\n\(.vmdata.pub_comments)\n\(.video_title)"' <<< "$jn")" #id #pagefilter #comment_count #title
+    _tmp1="$(hgrep 'div +class="video-metadata video-tags-list ordered-label-list cropped"; a +class="btn btn-default label main uploader-tag hover-name" +href @p"%(href)a\n"' <<< "$t")"
+    echo "${_tmp1##*/}" #channel
+    jn="$(hgrep 'script +type="application/ld+json" @p"%i\n"' <<< "$t")"
+    echo "$(jq -r '"\(.uploadDate)\n\(.duration)"' <<< "$jn")" #date #duration
+    echo "$(sed -n '/^[[:space:]]*html5player.setThumbUrl169(/{s/^.*('\''//; s/'\''.*$//;p;q}' <<< "$t")" #thumbnail
+    echo "$(sed -n '/^[[:space:]]*html5player.setThumbSlideBig(/{s/^.*('\''//; s/'\''.*$//;p;q}' <<< "$t")" #mozaique
+    echo "$(hgrep 'div +id="v-views"; strong +class="mobile-hide" @p"%i\n"' <<< "$t" | tr -d ,)" #views
+    echo "$(hgrep 'span +class="video-hd-mark" @p"%i\n"' <<< "$t")" #quality
+    echo "$(hgrep 'span +class="rating-good-nbr" @p"%i\n"' <<< "$t")" #likes
+    echo "$(hgrep 'span +class="rating-bad-nbr" @p"%i\n"' <<< "$t")" #dlikes
+    echo "$(hgrep 'div +class="video-metadata video-tags-list ordered-label-list cropped"; a .is-keyword @p"%i\n"' <<< "$t" | sed ':x; $!{N; s/\n/,/; bx}')" #tags
+    echo "$(hgrep 'div +class="video-metadata video-tags-list ordered-label-list cropped"; a .is-pornstar +href @p"%(href)a\n"' <<< "$t" | sed ':x; s/\/.*\///; $!{N; s/\n/,/; bx}')"
+    } | jq -RnMc '
+        input as $link |
+        input as $id |
+        input as $pagefilter |
+        input as $comment_count |
+        input as $title |
+        input as $channel |
+        input as $date |
+        input as $duration |
+        input as $thumbnail |
+        input as $mozaique |
+        input as $views |
+        input as $quality |
+        input as $likes |
+        input as $dlikes |
+        (input | split(",")) as $tags |
+        (input | split(",")) as $stars |
+
+        .["link"]=$link |
+        .["id"]=$id |
+        .["pagefilter"]=$pagefilter |
+        .["comment_count"]=$comment_count |
+        .["title"]=$title |
+        .["channel"]=$channel |
+        .["date"]=$date |
+        .["duration"]=$duration |
+        .["thumbnail"]=$thumbnail |
+        .["mozaique"]=$mozaique |
+        .["views"]=$views |
+        .["quality"]=$quality |
+        .["likes"]=$likes |
+        .["dlikes"]=$dlikes |
+        .["tags"]=$tags |
+        .["stars"]=$stars' > "$name" #$name3/$name
+    sed -n '/^<script>var video_related=/{s/^<script>var video_related=//; s/];window\..*/]/; p}' <<< "$t" | jq -r '"https://xvideos.com\(.[].u)"'
+}
+
+if [ "$#" -lt '2' ]
+then
+    usage >&2
+    exit 1
+fi
+
+cd "$1" || exit 1
+shift
+
+t1="$(mktemp)"
+trap 'rm "$t1"' EXIT
+while [ "$#" -gt 0 ]
+do
+    echo "$1" >&2
+    get_page "$1"
+    shift
+done > "$t1"
+
+while :
+do
+    [ -s "$t1" ] || exit
+    j="$(sort -u "$t1")"
+    for i in $j
+    do
+        [ "$(jobs | wc -l)" -gt "$threads" ] && wait %%
+        echo "$i" >&2
+        get_page "$i" &
+    done > "$t1"
+    wait
+done
