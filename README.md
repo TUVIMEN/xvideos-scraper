@@ -1,6 +1,6 @@
-# xvideos
+# xvideos-scraper
 
-A bash script for archiving xvideos videos metadata in json.
+A bash script for scraping xvideos videos metadata in json.
 
 ## Requirements
 
@@ -9,7 +9,7 @@ A bash script for archiving xvideos videos metadata in json.
 
 ## Installation
 
-    install -m 755 xvideos /usr/bin
+    install -m 755 xvideos-scraper /usr/bin
 
 ## Json format
 
@@ -18,5 +18,6 @@ Here's example of a [video](video-example.json).
 ## Usage
 
 It works as recursive spider getting urls from every page starting from URL.
+Resulting files are named by the sha256 of their url and saved to DIR.
 
-    xvideos DIR URL
+    xvideos-scraper DIR URL
