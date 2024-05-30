@@ -222,6 +222,7 @@ get_videos() {
         get_video "$1" "$t1" &
         shift
     done
+    wait
 
     while :
     do
