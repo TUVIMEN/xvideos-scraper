@@ -1,6 +1,6 @@
 #!/bin/bash
 
-declare -r threads='16'
+declare threads='16'
 
 ucurl() {
     curl -L -g -s --user-agent 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) QtWebEngine/5.15.2 Chrome/87.0.4280.144 Safari/537.36' -H 'Accept-Encoding: gzip, deflate' --compressed "$@"
@@ -12,78 +12,265 @@ usage() {
     printf '%s [dir] [URL]...\nArchive xvideos videos metadata in json to DIR\nUrls are taken from recursive spider starting from URL.\n' "$arg0"
 }
 
-get_page() {
-    local -r rh="$(sha256sum <<< "$1")"
-    local -r name="${rh%  *}"
-    #local -r name3="${name:0:3}"
-    [ -e "$name" ] && return #$name3/$name
-    local -r t="$(ucurl "$1")"
-    local jn="$(sed -n '/^<script>if(!window\.xv){window\.xv={};}window\.xv\.conf=/{s/^<script>if(!window\.xv){window\.xv={};}window.xv\.conf=//; s/;<\/script>$//; p;q}' <<< "$t")"
-    local _tmp1
-    {
-    echo "$1" #link
-    echo "$(jq -r '.dyn | "\(.id)\n\(.pagefilter)\n\(.vmdata.pub_comments)\n\(.video_title)"' <<< "$jn")" #id #pagefilter #comment_count #title
-    jn="$(reliq 'script type="application/ld+json" | "%i\n"' <<< "$t")"
-    echo "$(jq -r '"\(.uploadDate)\n\(.duration)"' <<< "$jn")" #date #duration
-    echo "$(sed -n '/^[[:space:]]*html5player.setThumbUrl169(/{s/^.*('\''//; s/'\''.*$//;p;q}' <<< "$t")" #thumbnail
-    echo "$(sed -n '/^[[:space:]]*html5player.setThumbSlideBig(/{s/^.*('\''//; s/'\''.*$//;p;q}' <<< "$t")" #mozaique
-
-    reliq '
-      . div .video-tags-list; a .uploader-tag href | "%(href)v\n" / sed "s#^/##",
-      . div #v-views; strong .mobile-hide | "%i\n" / tr ",",
-      . span .video-hd-mark | "%i\n",
-      . span .rating-good-nbr | "%i\n",
-      . span .rating-bad-nbr | "%i\n",
-      . div .video-tags-list; a .is-keyword | "%i\t" / echo "" "\n",
-      . div .video-tags-list; a .is-pornstar href | "%(href)v\t" / echo "" "\n"
-    ' <<< "$t"
-    } | jq -RnMc '
-        .["link"]=input |
-        .["id"]=input |
-        .["pagefilter"]=input |
-        .["comment_count"]=input |
-        .["title"]=input |
-        .["date"]=input |
-        .["duration"]=input |
-        .["thumbnail"]=input |
-        .["mozaique"]=input |
-        .["channel"]=input |
-        .["views"]=input |
-        .["quality"]=input |
-        .["likes"]=input |
-        .["dlikes"]=input |
-        .["tags"]=(input | split("\t"))[:-1] |
-        .["stars"]=(input | split("\t"))[:-1]' > "$name" #$name3/$name
-    sed -n '/^<script>var video_related=/{s/^<script>var video_related=//; s/];window\..*/]/; p}' <<< "$t" | jq -r '"https://xvideos.com\(.[].u)"'
+usage() {
+    printf '%s [OPTION]... [URL]...\n' "${0##*/}"
+    printf 'Archive xvideos videos, profiles, channels and pornstars metadata in json.\n'
+    printf 'Download functions are matched to URL.\n'
+    printf 'Options:\n  -d,\t--dir DIR\t\tchange directory to DIR\n'
+    printf '  -t,\t--threads NUM\t\tset number of processes to run at a time\n'
+    printf '  -p,\t--profile URL\t\tpass URL as profile,channel,pornstar link\n'
+    printf '  -P,\t--profiles\t\tdownload all profiles, channels and pornstars from sitemap\n'
+    printf '  -v,\t--video URL\t\tpass URL as video\n'
+    printf '  -V,\t--videos [URL]...\tpass [URL]... into recursive video spider\n'
+    printf '  -h,\t--help\t\t\tshow this message\n'
 }
 
-if [ "$#" -lt '2' ]
-then
-    usage >&2
-    exit 1
-fi
+get_comments() {
+    local -r baselink="https://www.xvideos.com/threads/$1/get-posts/new/$2"
+    echo "$baselink/0/0" >&2
+    local -r comments="$(ucurl "$baselink/0/0" -H 'X-Requested-With: XMLHttpRequest' --data-raw 'loaded_ids=&load_all=1' | jq -rcM '.posts')"
+    {
+    echo "$comments"
+    for i in $(jq -rcM '.children | to_entries[].key' <<< "$comments")
+    do
+        echo "$baselink/$i/0" >&2
+        ucurl "$baselink/$i/0" -H 'X-Requested-With: XMLHttpRequest' --data-raw 'loaded_ids=&load_all=1' | jq -rcM  --arg 'id' "$i" '.posts + {"id":$id}'
+    done
+    } | jq -s '
+        def conv_comments(nested):  . | map({
+            "id",
+            "date",
+            "name",
+            "link":.url,
+            "country",
+            "message",
+            "avatar":.pic,
+            "likes":.votes.nb,
+            "dlikes":.votes.nbb,
+            "nested":nested
+        });
 
-cd "$1" || exit 1
-shift
+        (.[0].posts | conv_comments(false)) as $posts |
+        [ .[0].posts[].id ] as $p_id |
+        [ .[1:][].id ] as $ch_id |
+        (.[1:] | map(.posts | conv_comments(true))) as $children |
 
-t1="$(mktemp)"
-trap 'rm "$t1"' EXIT
-while [ "$#" -gt 0 ]
-do
+        { "comments": ($posts | map(
+            .id as $id_p |
+            . as $p |
+            ($ch_id | index($id_p)) as $id_ch |
+            if $id_ch == null
+            then
+                $p
+            else
+                $p , $children[$id_ch][]
+            end
+        ))}'
+}
+
+get_video() {
+    local -r rh="$(sha256sum <<< "$1")"
+    local -r name="${rh%  *}"
+    [ -e "$name" ] && return
     echo "$1" >&2
-    get_page "$1"
-    shift
-done > "$t1"
+    local -r t="$(ucurl "$1")"
+    local thumbnail mozaique t2 id
+    {
+    t2="$(sed -n '/^<script>if(!window\.xv){window\.xv={};}window\.xv\.conf=/{s/^<script>if(!window\.xv){window\.xv={};}window.xv\.conf=//; s/;<\/script>$//; p;q}' <<< "$t" | jq -rcM --arg 'link' "$1" '.dyn | { "link":$link, "id", "title":.video_title, "pagefilter" }')"
+    echo "$t2"
 
-while :
-do
-    [ -s "$t1" ] || exit
-    j="$(sort -u "$t1")"
-    for i in $j
+    thumbnail="$(sed -n '/^[[:space:]]*html5player.setThumbUrl169(/{s/^.*('\''//; s/'\''.*$//;p;q}' <<< "$t")"
+    mozaique="$(sed -n '/^[[:space:]]*html5player.setThumbSlideBig(/{s/^.*('\''//; s/'\''.*$//;p;q}' <<< "$t")"
+    reliq 'script type="application/ld+json" | "%i\n"' <<< "$t" | jq -rcM --arg 'thumbnail' "$thumbnail" --arg 'mozaique' "$mozaique" '{
+        "date":.uploadDate,
+        ("duration"):(
+            (.duration | split("[A-Z]+";null)) as $d |
+            ($d[1] | tonumber)*3600+($d[2] | tonumber)*60+($d[3] | tonumber)
+        ),
+        "thumbnail":$thumbnail,
+        "mozaique":$mozaique
+    }'
+
+    reliq '
+      .channel div .video-tags-list; a .uploader-tag href | "%(href)v" sed "s#^/##",
+      .views.u div #v-views; strong .mobile-hide | "%i" tr ",",
+      .quality span .video-hd-mark | "%i",
+      .likes span .rating-good-nbr | "%i",
+      .dlikes span .rating-bad-nbr | "%i",
+      .tags.a div .video-tags-list; a .is-keyword | "%i\n",
+      .stars.a div .video-tags-list; a .is-pornstar href | "https://www.xvideos.com%(href)v\n"
+    ' <<< "$t"
+
+    if [ "$(reliq 'div #tabCommentsBottom; span .badge | "%i\n"' <<< "$t")" -gt 0 ]
+    then
+        id="$(jq -rcM '.id' <<< "$t2")"
+        get_comments 'video-comments' "$id"
+    else
+        echo "{\"comments\":[]}"
+    fi
+    } | jq -srcM '.[0]+.[1]+.[2]+.[3]' > "$name"
+    [ "$#" -gt '1' ] && sed -n '/^<script>var video_related=/{s/^<script>var video_related=//; s/];window\..*/]/; p}' <<< "$t"  | jq -r '"https://xvideos.com\(.[].u)"' >> "$2"
+}
+
+get_profile() {
+    local -r link="${1%#*}"
+    local -r rh="$(sha256sum <<< "$link")"
+    local -r name="${rh%  *}"
+    [ -e "$name" ] && return
+    echo "$link" >&2
+    local -r t="$(ucurl "$link")"
+    local t2 id pagefilter next has_friends has_fans
+    {
+        t2="$(reliq 'script m@b>"if(!window.xv){window.xv={};}window.xv.conf={\"" | "%i" sed "s/^if(!window.xv){window.xv={};}window.xv.conf=//;s/;$//"' <<< "$t" | jq -rcM  --arg 'link' "$link" '{ "link":$link, "pagefilter":.dyn.pagefilter, "id":.data.user.id_user, "name":.data.user.display, "avatar":.data.user.profile_picture, "sex":.data.user.sex, "ischannel":.data.user.channel, "has_membership":.data.user.has_membership, "galleries":.data.galleries | [ to_entries[].key ] , "total_rating":.data.user.pvote.total, "rating":.data.user.pvote.rating, "has_friends":.data.user.has_friends, "has_fans":.data.user.has_fans }')"
+        id="$(jq -rcM '.id' <<< "$t2")"
+        pagefilter="$(jq -rcM '.pagefilter' <<< "$t2")"
+        has_friends="$(jq -rcM '.has_friends' <<< "$t2")"
+        has_fans="$(jq -rcM '.has_fans' <<< "$t2")"
+        echo "$t2"
+
+        reliq '
+            .banner img .img-responsive src | "%(src)v",
+            .country h2; [0] span .flag title | "%(title)v",
+            .info-pieces p #b>pinfo- -#pinfo-physical-info -#pinfo-ranks -#b>pinfo-aboutme; {
+                .key strong | "%i" sed "s#/$##",
+                .value span | "%i"
+            } | ,
+            .description p #pinfo-aboutme | "%i" sed "s/<span.*//",
+            div #profile-tabs; {
+                .videos.u a #tab-videos; span .navbadge | "%i" tr ",",
+                .videos_red.u a #tab-videos-red; span .navbadge | "%i" tr ",",
+                .photos.u a #tab-photos; span .navbadge | "%i" tr ",",
+                .videos_in_playlists.u a #tab-favorites; span .navbadge | "%i" tr ","
+            }
+        ' <<< "$t"
+
+        echo "$link/ranks/$pagefilter" >&2
+        ucurl "$link/ranks/$pagefilter" -H 'X-Requested-With: XMLHttpRequest' | jq '{ "ranks":.rankings? }'
+
+        if [ -n "$(reliq 'a #goto-activity' <<< "$t")" ]
+        then
+            next='0'
+            while :
+            do
+                echo "$link/activity/$pagefilter" >&2
+                t2="$(ucurl "$link/activity/$pagefilter" -H 'X-Requested-With: XMLHttpRequest')"
+                reliq '
+                    .activity div .activity-event; {
+                        div .header; h4; {
+                            .title * l@[0] | "%i" sed "s/<span[^>]*>[^<]*<\/span>//;s/^ *//",
+                            .date span .timestamp | "%i"
+                        },
+                        .activity.a {
+                            p .act-achievement l@[1] | "%T\n",
+                            div .cust-nb-cols; div data-id l@[1] | "%(data-id)v\n",
+                            div .thumbs-5-cols; script | "%i\n" / sed "s/.*img src=\"\([^\"]*\)\".*/\1/p" "n",
+                            div .red-line; div #b>video_ data-id | "%(data-id)v\n"
+                        } } |' <<< "$t2"
+                next="$(sed 's/^<!-- //;s/ -->//;q' <<< "$t2")"
+                [ -n "$next" -o "$next" -eq '0' ] && break;
+            done | jq -srcM '{ "activity": [ .[].activity[] ] }'
+        else
+            echo "{\"activity\":[]}"
+        fi
+
+        if [ "$has_friends" = "true" ]
+        then
+            echo "$link/friends" >&2
+            ucurl -X POST -H 'X-Requested-With: XMLHttpRequest' "$link/friends" | reliq '
+                .friends_count.u h4 | "%i" / sed "s/,//g;s/^[^0-9]* //;s/[^0-9].*//;q",
+                .friends.a div #profile-friends; div #b>profile_; a href [0] | "https://www.xvideos.com%(href)v\n"
+                ' <<< "$t2"
+        else
+            echo '{"friends":[],"friends_count":0}'
+        fi
+
+        if [ "$has_fans" = "true" ]
+        then
+            echo "$link/fans" >&2
+            ucurl -X POST -H 'X-Requested-With: XMLHttpRequest' "$link/fans" | reliq '
+                .fans_count.u h4 | "%i" / sed "s/,//g;s/^[^0-9]* //;s/[^0-9].*//;q",
+                .fans.a div #profile-friends; div #b>profile_; a href [0] | "https://www.xvideos.com%(href)v\n"
+                ' <<< "$t2"
+        else
+            echo '{"fans":[],"fans_count":0}'
+        fi
+
+        get_comments 'profile-wall-posts' "$id"
+    } | jq -srcM '.[0]+.[1]+.[2]+.[3]+.[4]+.[5]+.[6]' > "$name"
+}
+
+get_profiles() {
+    for i in $(ucurl 'https://xvideos.com/sitemap.xml' | reliq 'loc | "%i\n" / sed "/_channels/p;/_models/p;/_amateurs/p" "n"')
+    do
+        for j in $(ucurl "$i" | reliq 'loc | "%i\n"')
+        do
+            [ "$(jobs | wc -l)" -gt "$threads" ] && wait %%
+            get_profile "$j" &
+        done
+    done
+    wait
+}
+
+get_videos() {
+    [ "$#" -eq 0 ] && return
+    local -r t1="$(mktemp)"
+    trap 'rm "$t1"' EXIT HUP INT QUIT TERM PWR EXIT
+
+    while [ "$#" -gt 0 ]
     do
         [ "$(jobs | wc -l)" -gt "$threads" ] && wait %%
-        echo "$i" >&2
-        get_page "$i" &
-    done > "$t1"
-    wait
+        get_video "$1" "$t1" &
+        shift
+    done
+
+    while :
+    do
+        [ -s "$t1" ] || exit
+        j="$(sort -u "$t1")"
+        for i in $j
+        do
+            [ "$(jobs | wc -l)" -gt "$threads" ] && wait %%
+            get_video "$i" "$t1" &
+        done
+        wait
+    done
+}
+
+[ "$#" -eq 0 ] && { usage >&2; exit 1; }
+
+while [ "$#" -gt 0 ]
+do
+    case "$1" in
+        -d|--dir) cd "$2" || exit; shift;;
+        -p|--profile)
+            get_profile "$2"
+            shift;;
+        -P|--profiles)
+            get_profiles
+            exit;;
+        -v|--video)
+            get_video "$2"
+            shift;;
+        -V|--videos)
+            get_videos "$@"
+            exit;;
+        -t|--threads) threads="$2"; shift;;
+        -h|--help) usage >&2; exit;;
+        -*) usage >&2; exit 1;;
+        *) break;;
+    esac
+    shift
+done
+
+while [ "$#" -gt 0 ]
+do
+    case "$1" in
+        https://www.xvideos.com/video.*)
+            get_video "$1";;
+        https://www.xvideos.com/*)
+            get_profile "$1";;
+        *)
+            printf 'unexpected url "%s"\n' "$1";;
+    esac
+    shift
 done
