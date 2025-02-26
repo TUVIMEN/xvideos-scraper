@@ -13,7 +13,7 @@ usage() {
 }
 
 usage() {
-    printf '%s [OPTION]... [URL]...\n' "${0##*/}"
+    printf '%s [OPTION]... [URL]...\n' "$arg0"
     printf 'Archive xvideos videos, profiles, channels and pornstars metadata in json.\n'
     printf 'Download functions are matched to URL.\n'
     printf 'Options:\n  -d,\t--dir DIR\t\tchange directory to DIR\n'
@@ -121,7 +121,7 @@ get_profile() {
     local -r t="$(ucurl "$link")"
     local t2 id pagefilter next has_friends has_fans
     {
-        t2="$(reliq 'script m@b>"if(!window.xv){window.xv={};}window.xv.conf={\"" | "%i" sed "s/^if(!window.xv){window.xv={};}window.xv.conf=//;s/;$//"' <<< "$t" | jq -rcM  --arg 'link' "$link" '{ "link":$link, "pagefilter":.dyn.pagefilter, "id":.data.user.id_user, "name":.data.user.display, "avatar":.data.user.profile_picture, "sex":.data.user.sex, "ischannel":.data.user.channel, "has_membership":.data.user.has_membership, "galleries":.data.galleries | [ to_entries[].key ] , "total_rating":.data.user.pvote.total, "rating":.data.user.pvote.rating, "has_friends":.data.user.has_friends, "has_fans":.data.user.has_fans }')"
+        t2="$(reliq 'script i@b>"if(!window.xv){window.xv={};}window.xv.conf={\"" | "%i" sed "s/^if(!window.xv){window.xv={};}window.xv.conf=//;s/;$//"' <<< "$t" | jq -rcM  --arg 'link' "$link" '{ "link":$link, "pagefilter":.dyn.pagefilter, "id":.data.user.id_user, "name":.data.user.display, "avatar":.data.user.profile_picture, "sex":.data.user.sex, "ischannel":.data.user.channel, "has_membership":.data.user.has_membership, "galleries":.data.galleries | [ to_entries[].key ] , "total_rating":.data.user.pvote.total, "rating":.data.user.pvote.rating, "has_friends":.data.user.has_friends, "has_fans":.data.user.has_fans }')"
         id="$(jq -rcM '.id' <<< "$t2")"
         pagefilter="$(jq -rcM '.pagefilter' <<< "$t2")"
         has_friends="$(jq -rcM '.has_friends' <<< "$t2")"
@@ -271,7 +271,7 @@ do
         https://www.xvideos.com/*)
             get_profile "$1";;
         *)
-            printf 'unexpected url "%s"\n' "$1";;
+            printf 'unsupported url "%s"\n' "$1";;
     esac
     shift
 done
