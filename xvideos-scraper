@@ -214,7 +214,7 @@ get_profiles() {
 get_videos() {
     [ "$#" -eq 0 ] && return
     local -r t1="$(mktemp)"
-    trap 'rm "$t1"' EXIT HUP INT QUIT TERM PWR EXIT
+    trap 'rm "$t1"' HUP INT QUIT TERM PWR EXIT RETURN
 
     while [ "$#" -gt 0 ]
     do
