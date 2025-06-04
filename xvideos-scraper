@@ -1,4 +1,6 @@
 #!/bin/bash
+# by Dominik Stanisław Suchora <hexderm@gmail.com>
+# License: GNU GPLv3
 
 declare threads='16'
 
